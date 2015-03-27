@@ -1,0 +1,320 @@
+# -*-Shell-script-*-
+#
+# @file: functions
+# @brief: bash functions for sshexpr
+# @author: YoungJoo.Kim <vozlt@vozlt.com>
+# @version:
+# @date:
+#
+
+TEXTDOMAIN=sshexprscripts
+
+# Make sure umask is sane
+umask 022
+
+# Set up a default search path.
+PATH="/sbin:/usr/sbin:/bin:/usr/bin"
+export PATH
+
+# Global Return Variables
+G_RET_VAL=
+G_RET_STR=
+G_RET_CAC=
+G_HASH_VAL=
+
+_sshexpr_verbose() {
+    local _flag=$1
+    [ -z "${G_VERBOSE_FLAG:-}" ] && G_VERBOSE_FLAG=1 || G_VERBOSE_FLAG=
+    if [ -n "$_flag" ]; then
+        [ "$_flag" == "on" ] && G_VERBOSE_FLAG=1 || G_VERBOSE_FLAG=
+    fi
+}
+
+_sshexpr_ansi() {
+    local _flag=$1
+    [ -z "${G_ANSI_FLAG:-}" ] && G_ANSI_FLAG=1 || G_ANSI_FLAG=
+    if [ -n "$_flag" ]; then
+        [ "$_flag" == "on" ] && G_ANSI_FLAG=1 || G_ANSI_FLAG=
+    fi
+}
+
+_sshexpr_set_global_config() {
+    _sshexpr_parse_config ${G_CFG_PATH:-/etc/sshexpr/sshexpr.conf}
+
+    G_VERBOSE_FLAG=1
+    G_ANSI_FLAG=1
+
+    return $G_RET_VAL
+}
+
+_sshexpr_parse_config() {
+    local _cfg=$1 cfg=
+    [ ! -f "$_cfg" ] && return 1
+    for cfg in $(__sshexpr_load_config ${_cfg})
+    do
+        _left=${cfg%%=*}
+        _right=${cfg#*=}
+        _right=${_right//\[\[:space:\]\]/ }
+        __sshexpr_hash_insert "_config" "$_left" "$_right"
+    done
+}
+
+_sshexpr_get_config() {
+    local _cfg=$1
+    __sshexpr_hash_select "_config" "$_cfg"
+}
+
+_sshexpr_parse_options() {
+    local _options=$* option=
+    for option in $_options
+    do
+        _left=${option//=*/}
+        _right=${option//*=/}
+        __sshexpr_hash_insert "_options" "$_left" "$_right"
+    done
+}
+
+_sshexpr_get_option() {
+    local _option=$1
+    __sshexpr_hash_select "_options" "$_option"
+}
+
+_sshexpr_ansi_echo() {
+    local _msg=$1
+    local _color=$2
+
+    __sshexpr_hash_insert "_colors" "black" "30"
+    __sshexpr_hash_insert "_colors" "red" "31"
+    __sshexpr_hash_insert "_colors" "green" "32"
+    __sshexpr_hash_insert "_colors" "yellow" "33"
+    __sshexpr_hash_insert "_colors" "blue" "34"
+    __sshexpr_hash_insert "_colors" "magenta" "35"
+    __sshexpr_hash_insert "_colors" "cyan" "36"
+    __sshexpr_hash_insert "_colors" "white" "37"
+
+    ! [[ "$_color" =~ ^[0-9]+$ ]] && _color=$(__sshexpr_hash_select "_colors" "$_color")
+    [ -z "$_color" ] && _color=$(__sshexpr_hash_select "_colors" "blue")
+
+    if [ -n "${G_ANSI_FLAG:-}" ]; then
+        echo -en "\\033[1;${_color}m${_msg}\033[0m"
+    else
+        echo -en "${_msg}"
+    fi
+}
+
+_sshexpr_print() {
+    local _msg=$1
+    local _color=$2
+    if [ -n "${G_VERBOSE_FLAG:-}" ]; then
+        echo -n "# "
+        _sshexpr_ansi_echo "$_msg" "$_color"
+        echo
+    fi
+}
+
+_sshexpr_check_code() {
+    if [ "$G_RET_VAL" != "0" ]; then
+        _sshexpr_print "[$G_RET_STR] _sshexpr_check_code[$G_RET_VAL]: FAILED" "red"
+        exit $G_RET_VAL
+    fi
+}
+
+_sshexpr_progress() {
+    local _limit=$1
+    local xs=( '/' '-' '|' )
+    local xc=${#xs[@]}
+    local x=
+
+    for ((i=1; i <= _limit; i++))
+    do
+        usleep 100000
+        x=$((i%xc))
+        echo -n "[${xs[$x]}]"
+        echo -en "\b\b\b"
+    done
+}
+
+__sshexpr_function_maps() {
+    local _fp=$1
+    eval $_fp
+    G_RET_VAL=$?
+    return $G_RET_VAL
+}
+
+__sshexpr_exist_file() {
+    local _file=$1
+    [ -e "$_file" ] && G_RET_VAL=0 || G_RET_VAL=1
+    return $G_RET_VAL 
+}
+
+__sshexpr_exist_command() {
+    local _command=$1
+    hash $_command &> /dev/null
+    G_RET_VAL=$?
+    return $G_RET_VAL 
+}
+
+__sshexpr_set_ret_str() {
+    local _str=$1
+    [ -z "$_str" ] && _str="o:x"
+    local _left=${_str//:*/}
+    local _right=${_str//*:/}
+    [ "$G_RET_VAL" == "0" ] && G_RET_STR="$_left" || G_RET_STR="$_right"
+}
+
+__sshexpr_replace_string() {
+    local _string=$1
+    local _org_str=$2
+    local _new_str=$3
+    #echo -n ${_string//$_org_str/$_new_str}
+    _string=${_string//"$_org_str"/"$_new_str"}
+    echo -n "$_string"
+    #echo -en ${_string//$_org_str/$_new_str}
+}
+
+__sshexpr_replace_file() {
+    local _from_str=$1
+    local _to_str=$2
+    local _file=$3
+    _from_str=${_from_str//\//\\/};
+    _to_str=${_to_str//\//\\/};
+    \perl -p -i -e "s/$_from_str/$_to_str/g" "$_file";
+    G_RET_VAL=$?
+    return $G_RET_VAL 
+}
+
+__sshexpr_fputs() {
+    local _dst=$1
+    local _str=$2
+    local _opt=$3
+    [ "$_opt" == "a" ] && printf "$_str" >> $_dst || printf "$_str" > $_dst
+    G_RET_VAL=$?
+    return $G_RET_VAL 
+}
+
+__sshexpr_mkdir() {
+    local _dest=$*
+    [ ! -e "$_dest" ] && \mkdir -p ${_dest}
+    [ -d "$_dest" ] && G_RET_VAL=0 || G_RET_VAL=1
+    return $G_RET_VAL 
+}
+
+__sshexpr_remove() {
+    local _dest=$1
+    \rm -rf $_dest
+    G_RET_VAL=$?
+    return $G_RET_VAL 
+}
+
+__sshexpr_move() {
+    local _src=$1
+    local _dst=$2
+    \mv -f $_src $_dst
+    G_RET_VAL=$?
+    return $G_RET_VAL 
+}
+
+__sshexpr_copy() {
+    local _src=$1
+    local _dst=$2
+    [ -e "$_src" ] && \cp -af "$_src" "$_dst"
+    G_RET_VAL=$?
+    return $G_RET_VAL 
+}
+
+__sshexpr_link() {
+    local _src=$1
+    local _dst=$2
+    [ -e "$_src" ] && \ln -sf "$_src" "$_dst"
+    G_RET_VAL=$?
+    return $G_RET_VAL 
+}
+
+__sshexpr_search_array() {
+    local _str=$1
+    local _dst=(${!2})
+    local _c=${#_dst[@]}
+    G_RET_VAL=1
+    for ((i=0; i < $_c; i++))
+    do 
+        if [ "$_str" == "${_dst[$i]}" ]; then
+            G_RET_VAL=0
+            break
+        fi
+    done
+    return $G_RET_VAL
+}
+
+__sshexpr_grep() {
+    local _str=$1
+    local _dst=$2
+    [ -e "$_dst" ] && \grep "$_str" $_dst >& /dev/null
+    G_RET_VAL=$?
+    return $G_RET_VAL 
+}
+
+__sshexpr_cat() {
+    local _dst=$1
+    [ -e "$_dst" ] && \cat "$_dst"
+    G_RET_VAL=$?
+    return $G_RET_VAL 
+}
+
+__sshexpr_syslog_write() {
+    local _str=$1
+    local _facility=$2
+    local _level=$3
+    _facility=${_facility:=daemon}
+    _level=${_level:=warn}
+    \logger -p "${_facility}.${_level}" "$_str"
+}
+
+__sshexpr_tcp_port_scan() {
+    local _host=$1
+    local _port=$2
+    local _timeout=$3
+    : ${_timeout:=2}
+    timeout $_timeout bash -c "(echo >/dev/tcp/$_host/$_port) &> /dev/null"
+    G_RET_VAL=$?
+    return $G_RET_VAL 
+}
+
+__sshexpr_load_config() {
+    local _files_path=$1
+    local _flags=$2
+    local _glue=$3
+    _glue=${_glue:-"\n"}
+    _flags=${_flags:-double_quote_false|ini_false}
+    \gawk -v _glue=$_glue -v _flags=$_flags '{
+            if ( tolower(_flags) !~ "double_quote_true" ) { gsub(/"/, ""); }
+            gsub(/(^[[:space:]]*|[[:space:]]*$)/, "");
+            sub(/[[:space:]]*=[[:space:]]*/, "=");
+            gsub(/[[:space:]]/, "[[:space:]]");
+            if ( tolower(_flags) ~ "ini_true" ) {
+                pat="^[^(#|;)[:space:]].*"
+            } else {
+                pat="^[^#[:space:]].*"
+            }
+            if( $0 ~ pat ) {
+                printf "%s%s", $0, _glue;
+            }
+    }' $_files_path
+}
+
+__sshexpr_hash_insert() {
+    local name=$1 key=$2 val=$3
+    eval __hash_${name}_${key}=\"$val\"
+}
+
+__sshexpr_hash_select() {
+    local name=$1 key=$2
+    local var=__hash_${name}_${key}
+    G_HASH_VAL=${!var}
+    echo -n "$G_HASH_VAL"
+}
+
+# Read in program's configuration
+_sshexpr_set_global_config
+
+# :let b:is_bash=1 | set filetype=sh
+# vi:set ft=sh ts=4 sw=4 et fdm=marker:

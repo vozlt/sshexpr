@@ -1,0 +1,88 @@
+# @file: sshexpr.conf
+# @brief: configuration file for sshexpr
+# @author: YoungJoo.Kim
+# @version:
+# @date:
+
+# - Description:    default path to find server list and spec file and execution file
+# - Syntax:         files_path_group = {path}
+# - Example:
+#           files_path_group = /etc/sshexpr/server
+files_path_group=@sysconfdir@/server
+
+# - Description:    default path to find spec files
+# - Syntax:         files_path_spec = {path}
+# - Example:
+#           files_path_spec = /etc/sshexpr/spec
+files_path_spec=@sysconfdir@/spec
+
+# - Description:    default path to find execution file
+# - Syntax:         files_path_exec = {path}
+# - Example:
+#           files_path_exec = /etc/sshexpr/exec
+files_path_exec=@sysconfdir@/exec
+
+# - Description:    alias for all of groups
+# - Syntax:         files_path_group = {strings}
+# - Example:
+#           alias_groups_all = groups:all
+alias_groups_all=groups:all
+
+# - Description:    command for connecting server
+# - Syntax:         tunnel_command = {path}
+# - Example:
+#           ssh
+#           sshpass ssh
+#           ...
+tunnel_command="@ssh@"
+tunnel_command_options="-o ConnectTimeout=5 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=quiet"
+
+# - Description:    command for file transfer
+# - Syntax:         transfer_command = {path}
+# - Example:
+#           ssh
+#           scp
+#           sshpass ssh
+#           sshpass scp
+#           ...
+transfer_command="@scp@"
+transfer_command_options="\$tunnel_command_options -r"
+
+# - Description:    server groups to alert, if correspond with pattern in alert_regex_command
+# - Syntax:         alert_regex_group = {patterns}
+# - Example:
+#           alert_regex_group = "^(server_group_www|server_group_image)$"
+alert_regex_group="^(www|image|auth)$"
+
+# - Description:    command patterns to alert
+# - Syntax:         alert_regex_group = {patterns}
+# - Example:
+#           alert_regex_group = "^(server_group_www|server_group_image)$"
+alert_regex_command="^(rm|reboot|shutdown|halt|dd)"
+
+# - Description:    strings to alert
+# - Syntax:         alert_string= {strings}
+# - Example:
+#           alert_regex_group = "^(server_group_www|server_group_image)$"
+alert_string="Are you sure you want to continue running(yes/no)? "
+alert_color="red"
+
+# - Description:    send a running log to syslog
+# - Syntax:         syslog_write = {true|false}
+# - Example:
+#           syslog_write = true
+#           syslog_facility = daemon
+#           syslog_level = warn
+syslog_write=true
+syslog_facility=daemon
+syslog_level=warn
+
+# - Description:    comment strings for the result (default: false)
+# - Syntax:         comment_string = {strings}
+# - Example:
+#           comment_string = ">>>"
+#           comment_color = "green"
+comment_string=">>>"
+comment_color="green"
+
+# vi:set ft=conf ts=4 sw=4 et fdm=marker:

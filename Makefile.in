@@ -1,0 +1,77 @@
+# @file: Makefile.in
+# @brief:
+# @author: YoungJoo.Kim <vozlt@vozlt.com>
+# @version:
+# @date:
+
+DESTDIR         =
+
+name            = sshexpr
+prefix          = @prefix@
+exec_prefix     = @exec_prefix@
+libdir          = @libdir@
+bindir          = @bindir@
+sysconfdir      = @sysconfdir@/$(name)
+bash            = @bashpath@
+bashlib         = @bashlib@
+
+SED				= @SED@
+SCP				= @SCP@
+SSH				= @SSH@
+MAKE            = @MAKE@
+RM              = @RM@ -f
+INSTALL         = @INSTALL@
+
+LIB_DIR = src/lib
+LIBS = $(wildcard $(LIB_DIR:=/*))
+
+CNF_DIR = conf
+CNFS = $(wildcard $(CNF_DIR:=/*.conf))
+
+BIN_TARGETS		= $(name)
+LIB_TARGETS		= $(notdir $(LIBS))
+
+ifdef bashlib
+	bash_lib_dir = $(bashlib)
+else
+	bash_lib_dir = $(libdir)
+endif
+
+ifndef SCP
+	SCP = \\$$tunnel_command
+endif
+
+bash_lib_path = $(prefix)$(bash_lib_dir)
+
+all:
+	$(INSTALL) -d -m755 .build/{conf,bin}
+
+	$(foreach val,\
+		$(BIN_TARGETS),\
+		$(SED) -e 's!\@bash_bin_path\@!$(bash)!g' \
+		-e 's!\@bash_lib_path\@!$(bash_lib_path)!g' \
+		-e 's!\@sysconfdir\@!$(sysconfdir)!g' \
+		src/bin/$(val).in > .build/bin/$(val);)
+
+	$(SED) -e 's!\@sysconfdir\@!$(sysconfdir)!g' \
+		-e 's!\@ssh\@!$(SSH)!g' \
+		-e 's!\@scp\@!$(SCP)!g' \
+		$(CNF_DIR)/$(name).conf.in > .build/conf/$(name).conf
+
+
+install:
+	$(INSTALL) -d -m755 $(DESTDIR)$(bash_lib_path)
+	$(INSTALL) -d -m755 $(DESTDIR)$(bindir)
+	$(INSTALL) -d -m755 $(DESTDIR)$(sysconfdir)
+	$(INSTALL) -m644 $(LIBS) $(DESTDIR)$(bash_lib_path)
+	$(INSTALL) -m755 $(wildcard .build/bin/*) $(DESTDIR)$(bindir)
+	$(INSTALL) -m600 $(wildcard .build/conf/*) $(DESTDIR)$(sysconfdir)
+
+uninstall:
+	cd $(DESTDIR)$(bash_lib_path); \
+	$(RM) $(LIB_TARGETS)
+	cd $(DESTDIR)$(bindir); \
+	$(RM) $(BIN_TARGETS)
+
+clean:
+	$(RM) -r .build

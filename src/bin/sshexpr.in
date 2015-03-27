@@ -1,0 +1,837 @@
+#! @bash_bin_path@
+#
+# @file: sshexpr
+# @brief: bash script to help the ssh client
+# @author: YoungJoo.Kim <vozlt@vozlt.com>
+# @version:
+# @date:
+#
+
+# name of program
+this_name=sshexpr
+
+# set config path
+G_CFG_PATH=@sysconfdir@/sshexpr.conf
+
+# set default hostname
+shost=$(hostname -s)
+
+# return variable
+RET_VAL=
+
+sshexpr_check_error_code() {
+    local _msg=$1
+    if [ "$RET_VAL" != "0" ]; then
+        _sshexpr_print "$_msg" "red"
+        exit $RET_VAL
+    fi
+    return $RET_VAL
+}
+
+sshexpr_error() {
+    local _msg=$1
+    local _errno=$2
+    : ${_errno:=1}
+    _sshexpr_print "$_msg" "red"
+    exit $_errno
+}
+
+sshexpr_echo() {
+    local _msg=$1
+    local _color=$2
+    local _escape=$3
+    if [ "$_escape" == "escape_true" ]; then
+        _msg=$(__sshexpr_replace_string "$_msg" "\\" "\\\\")
+    fi
+    [ -z "$_color" ] && _color="green"
+    if [ "$ansi_flag" != "false" ]; then
+        _sshexpr_ansi_echo "$_msg" "$_color"
+    else
+        echo -en "$_msg"
+    fi
+    return $?
+}
+
+sshexpr_verbose() {
+    local _s=$1
+    local _f=$2
+    local _c=$3
+    local _fmt="| %-32s| %-5s|\n"
+    local _hr="+---------------------------------+------+\n"
+
+    [ "$verbose_flag" == "true" ] || return $?
+
+    echo
+    printf $_hr
+    printf "$_fmt" "Result" "N"
+    printf $_hr
+    printf "$_fmt" "Success" $_s
+    printf "$_fmt" "Failure" $_f
+    printf $_hr
+    printf "$_fmt" "Total" $_c
+    printf $_hr
+
+    return $?
+}
+
+sshexpr_syslog_write() {
+    local _str=$1
+    local _facility=$2
+    local _level=$3
+    _facility=${_facility:-$syslog_facility}
+    _level=${_level:-$syslog_level}
+
+    if [ "$syslog_write" == "true" ]; then
+        __sshexpr_syslog_write "$_str" "$_facility" "$_level"
+        [ "$verbose_flag" == "true" ] && { sshexpr_echo ">>> !syslog $_str" "yellow" escape_true;echo; }
+    fi
+}
+
+sshexpr_get_groups() {
+    if [ -d "$files_path_group" ]; then
+        pushd $files_path_group &> /dev/null
+        host_groups=($(echo -n *))
+        popd &> /dev/null
+        RET_VAL=0
+    else
+        host_groups=
+        RET_VAL=1
+    fi
+
+    return $RET_VAL
+}
+
+sshexpr_search_groups() {
+    local _group=$1
+    __sshexpr_search_array $_group host_groups[@]
+    RET_VAL=$?
+    return $RET_VAL
+}
+
+sshexpr_get_group_hosts() {
+    local _group=$1 _user= _file=
+    local _cfg= _c=
+
+    if [[ "$_group" =~ @ ]]; then
+        _user=${_group%%@*}
+        _group=${_group##*@}
+    fi
+
+    if [ "$tranfer_flag" == "true" ]; then
+        _file=${_group##*:}
+        _group=${_group%:*}
+    fi
+
+    # check exist group
+    sshexpr_search_groups $_group
+    RET_VAL=$?
+    [ "$RET_VAL" != "0" ] && return $RET_VAL
+
+    pushd $files_path_group &> /dev/null
+
+    _c=0
+    for _cfg in $(__sshexpr_load_config ${_group})
+    do 
+        _cfg=${_cfg#*=}
+        _cfg=${_cfg//\[\[:space:\]\]/ }
+        [ -n "$_user" ] && _cfg="$_user@$_cfg"
+        [ "$tranfer_flag" != "true" ] && echo "$_cfg" || echo "$_cfg:$_file"
+        ((_c++))
+    done
+    popd &> /dev/null
+    
+    [ "$_c" -gt "0" ] && RET_VAL=0 || RET_VAL=1
+
+    return $RET_VAL
+}
+
+sshexpr_get_hosts() {
+    local _hosts=$*
+    local _host= _range=
+
+    _hosts=${_hosts//,/ }
+
+    [ "$_hosts" == "$alias_groups_all" ] && _hosts=${host_groups[@]}
+
+    for _host in $_hosts
+    do
+        # host range syntax
+        _range=$(expr $_host : '.*\[\(.*\)\]')
+        if [ -n "$_range" ]; then
+            range=${_range//-/..}
+            _host_regex=${_host//[/\{}
+            _host_regex=${_host_regex//]/\}}
+            _host_regex=${_host_regex/$_range/$range}
+            __sshexpr_function_maps "echo $_host_regex"
+            RET_VAL=$?
+            continue
+        fi
+
+        sshexpr_get_group_hosts $_host
+
+        # If hostname
+        [ $RET_VAL != "0" ] && echo $_host
+    done
+
+    return $RET_VAL
+}
+
+sshexpr_print_groups() {
+    local _groups=($*)
+    local _files= _servers= _server= _group= _tc= _rc=
+    local _fmt="| %-32s| %-5s|\n"
+    local _hr="+---------------------------------+------+\n"
+
+    _rc=0
+
+    if [ ! -d "$files_path_group" ]; then
+        _rc=1
+    else
+        pushd $files_path_group &> /dev/null
+        shopt -s nullglob
+        shopt -s dotglob
+        _files=(*)
+        if [ ${#_files[@]} -eq 0 ]; then
+            _rc=2
+        fi
+        shopt -u nullglob
+        shopt -u dotglob
+        popd &> /dev/null
+    fi
+
+    if [ $_rc -gt 0 ]; then
+        if [ $_rc -eq 1 ]; then
+            sshexpr_echo ">> $files_path_group does not exist!\n" "yellow"
+        else
+            sshexpr_echo ">> $files_path_group is empty!\n" "yellow"
+        fi
+        sshexpr_echo ">> Write a server list file into $files_path_group as follows:\n\n" "yellow"
+        sshexpr_echo "$ vi $files_path_group/groupName\n"
+        sshexpr_echo "host1\nhost2\n.\n.\n\n" "cyan"
+        exit $_rc
+    fi
+
+    pushd $files_path_group &> /dev/null
+
+    _tc=0
+
+    if [ -z "$_groups" ]; then
+        printf $_hr
+        printf "$_fmt" "Group" "N"
+        printf $_hr
+        for i in ${host_groups[@]}
+        do
+            _servers=($(__sshexpr_load_config $i))
+            printf "$_fmt" $i ${#_servers[@]}
+            ((_tc+=${#_servers[@]}))
+        done
+        printf $_hr
+        printf "$_fmt" "Total groups" ${#host_groups[@]}
+        printf "$_fmt" "Total servers" $_tc
+        printf $_hr
+
+        popd &> /dev/null
+        return 0
+    fi
+
+    for _group in ${_groups[@]}
+    do
+        sshexpr_search_groups $_group || sshexpr_error "Group[$_group] does not exist!"
+        _servers=($(__sshexpr_load_config $_group))
+
+        printf $_hr
+        printf "$_fmt" "$_group" "N"
+        printf $_hr
+        for _server in ${_servers[@]}
+        do
+            _server=${_server//\[\[:space:\]\]/ }
+            printf "$_fmt" "$_server" "1"
+        done
+        printf $_hr
+        printf "$_fmt" "Total" ${#_servers[@]} 
+        printf $_hr
+
+        ((_tc+=${#_servers[@]}))
+    done
+    if [ ${#_groups} -gt 1 ]; then
+        printf $_hr
+        printf "$_fmt" "Total groups" ${#_groups[@]}
+        printf "$_fmt" "Total servers" $_tc
+        printf $_hr
+    fi
+
+    popd &> /dev/null
+
+    return 0
+}
+
+sshexpr_get_list() {
+    local _args=("${!1}")
+    if [ -z "${_args[0]}" ]; then
+        sshexpr_print_groups
+    elif [ "${_args[0]}" == "$alias_groups_all" ]; then
+        sshexpr_print_groups "${host_groups[@]}"
+    else
+        sshexpr_print_groups "${_args[@]}"
+    fi
+}
+
+sshexpr_set_env() {
+    local _SSHPASS=
+    RET_VAL=1
+    if [ "$sshpass_env_flag" == "true" ]; then
+        echo -n "Password: "
+        read -s _SSHPASS
+        echo
+        [ -n "$_SSHPASS" ] && export SSHPASS=$_SSHPASS
+        RET_VAL=0
+    fi
+    return $RET_VAL
+}
+
+sshexpr_escape_ssh_cmd() {
+    local _cmd=$1
+    _cmd=$(__sshexpr_replace_string "$_cmd" "\$" "\\\$")
+    _cmd=$(__sshexpr_replace_string "$_cmd" "\"" "\\\"")
+    echo -n "$_cmd"
+}
+
+sshexpr_alert() {
+    local _hosts=$1
+    local _cmd=$2
+    local _select=
+
+    ! [[ "$_hosts" =~ $alert_regex_group ]] && return 0
+    if [[ "$_cmd" =~ $alert_regex_command ]]; then
+        sshexpr_echo "$alert_string" "$alert_color" escape_true
+        read _select
+        [ "$_select" != "yes" ] && exit 1
+    fi
+}
+
+sshexpr_exec() {
+    local _cmd=$1
+    [ "$verbose_flag" == "true" ] && { sshexpr_echo "\$ $_cmd" "white" escape_true;echo; }
+    [ "$trial_flag" != "true" ] && __sshexpr_function_maps "$_cmd"
+    RET_VAL=$?
+    return $RET_VAL
+}
+
+sshexpr_transfer_to_ssh() {
+    local _s= _f= _c= _cmd= _host= _hosts= _mode= _send_files= _recv_files= _send_path= _recv_path=
+    local _mode=$1
+    local _host=$2
+    local _file=$3
+    local _path=$4
+    if [ "$_mode" == "send" ]; then
+        local _send_dir_name=$(dirname $_file)
+        local _send_base_name=$(basename $_file)
+        sshexpr_exec "pushd $_send_dir_name &> /dev/null;\tar cp $_send_base_name | $tunnel_command $tunnel_command_options $_host \"\tar xvp -C $_path\";popd &> /dev/null"
+    else
+        local _recv_dir_name=$(dirname $_file)
+        local _recv_base_name=$(basename $_file)
+        sshexpr_exec "$tunnel_command $tunnel_command_options $_host \"cd $_recv_dir_name;\tar cp $_recv_base_name\" | \tar xvp -C $_path"
+    fi
+    RET_VAL=$?
+    return $RET_VAL
+}
+
+sshexpr_transfer_to_scp() {
+    local _mode=$1
+    local _host=$2
+    local _file=$3
+    local _path=$4
+    if [ "$_mode" == "send" ]; then
+        sshexpr_exec "$transfer_command $transfer_command_options ${_file} ${_host}:${_path}"
+    else
+        sshexpr_exec "$transfer_command $transfer_command_options ${_host}:${_file} ${_path}"
+    fi
+    RET_VAL=$?
+    return $RET_VAL
+}
+
+sshexpr_transfer_file() {
+    local _s= _f= _c= _buf= _host= _hosts= _fp=
+    local _mode= _send_files= _recv_files= _send_path= _recv_path=
+
+    local _args=("${!1}")
+    local _c=${#_args[@]}
+
+    ! [[ "$transfer_command" =~ scp ]] && _fp=sshexpr_transfer_to_ssh || _fp=sshexpr_transfer_to_scp
+
+    # pattern not found!
+    ! [[ "${_args[@]}" =~ : ]] && exit 1
+
+    [ "$_c" -lt "2" ] && exit 1
+
+    _c=$((_c - 1))
+    
+    [[ "${_args[$_c]}" =~ : ]] && _mode="send" || _mode="recv"
+
+    [ "$_mode" == "send" ] && _hosts=${_args[$_c]} || _hosts=${_args[0]}
+    [ "$_mode" == "send" ] && _send_path=${_hosts##*:}
+    [ "$_mode" == "recv" ] && _recv_path=${_args[$_c]}
+
+    if [ "$_mode" == "send" ]; then
+        for ((i=0; i < $_c; i++))
+        do 
+            if [ -n "$_send_files" ]; then
+                _send_files="$_send_files ${_args[$i]}"
+            else
+                _send_files="${_args[$i]}"
+            fi
+        done
+    else
+        _recv_files=${_hosts##*:}
+    fi
+
+    _c=0 _s=0 _f=0
+    _hosts=($(sshexpr_get_hosts $_hosts))
+    for _host in ${_hosts[@]}
+    do
+        local _only_host=${_host%:*}
+        if [ "$_mode" == "send" ]; then
+            if [ "$quiet_flag" != "true" ]; then
+                sshexpr_echo "$comment_string !$_mode" $comment_color
+                sshexpr_echo " \$ $_send_files $_only_host:$_send_path\n" "red"
+            fi
+            local _file=
+            for _file in $_send_files
+            do
+                [ "$trial_flag" != "true" ] && __sshexpr_function_maps "$_fp \"$_mode\" \"$_only_host\" \"$_file\" \"$_send_path\""
+            done
+        else
+            [ "$quiet_flag" != "true" ] && sshexpr_echo "$comment_string !$_mode" $comment_color
+            if [ "${#_hosts[@]}" -gt "1" ]; then
+                [ "$quiet_flag" != "true" ] && sshexpr_echo " \$ $_only_host:$_recv_files $_recv_path/$_only_host \n" "red"
+                if [ "$trial_flag" != "true" ]; then
+                    __sshexpr_mkdir "$_recv_path/$_only_host" && __sshexpr_function_maps "$_fp \"$_mode\" \"$_only_host\" \"$_recv_files\" \"$_recv_path/$_only_host\""
+                fi
+            else
+                [ "$quiet_flag" != "true" ] && sshexpr_echo " \$ $_only_host:$_recv_files $_recv_path \n" "red"
+                [ "$trial_flag" != "true" ] && __sshexpr_function_maps "$_fp \"$_mode\" \"$_only_host\" \"$_recv_files\" \"$_recv_path\""
+            fi
+        fi
+        RET_VAL=$?
+        # if you do not use ':', run both because it is processed by logical operation.
+        [ "$RET_VAL" == "0" ] && : $((_s++)) || : $((_f++))
+
+        ((_c++))
+    done
+
+    sshexpr_verbose "$_s" "$_f" "$_c"
+
+    _buf="[$this_name] >> success[$_s], failure[$_f] >> $_mode >> ${_args[@]}"
+    sshexpr_syslog_write "$_buf"
+    return $RET_VAL
+}
+
+sshexpr_transfer_command() {
+    local _s= _f= _c= _ocmd= _cmd= _host= _hosts= _compare_string= _verbose_flag=
+    local _args=("${!1}")
+    local _c=${#_args[@]}
+
+    [ "$_c" -lt "2" ] && exit 1
+    _c=$((_c - 1))
+    _cmd=${_args[$_c]}
+    _ocmd=$_cmd
+    _cmd=$(sshexpr_escape_ssh_cmd "$_cmd")
+
+    [ "$background_flag" == "true" -a -z "$compare_string" ] && _cmd="$_cmd &> /dev/null &"
+    for ((i=0; i < $_c; i++))
+    do 
+        if [ -n "$_hosts" ]; then
+            _hosts="$_hosts ${_args[$i]}"
+        else
+            _hosts="${_args[$i]}"
+        fi
+    done
+    _c=0 _s=0 _f=0
+    sshexpr_alert "$_hosts" "$_cmd"
+    for _host in $(sshexpr_get_hosts $_hosts)
+    do
+        if [ "$quiet_flag" != "true" ]; then
+            sshexpr_echo "$comment_string $_host" $comment_color
+            sshexpr_echo " \$ $_ocmd" "red" escape_true;echo
+        fi
+        if [ -n "$compare_string" ]; then
+            if [ "$verbose_flag" == "true" -o "$_verbose_flag" == "true" ]; then
+                sshexpr_echo "\$ $tunnel_command $tunnel_command_options $_host \"$_cmd\"" "white" escape_true
+                echo
+                _verbose_flag="true"
+                verbose_flag="false"
+            fi
+            _compare_string=$(sshexpr_exec "$tunnel_command $tunnel_command_options $_host \"$_cmd\"")
+            if [ "$compare_string" != "$_compare_string" ]; then
+                sshexpr_echo "[X] $compare_string != $_compare_string\n" "yellow"
+                RET_VAL=1
+            else
+                sshexpr_echo "[O] $compare_string == $_compare_string\n" "blue"
+                RET_VAL=0
+            fi
+        else
+            sshexpr_exec "$tunnel_command $tunnel_command_options $_host \"$_cmd\""
+            RET_VAL=$?
+        fi
+
+        if [ "$RET_VAL" == "0" ]; then
+            ((_s++))
+        else
+            ((_f++))
+        fi
+        ((_c++))
+    done
+
+    [ "$_verbose_flag" == "true" ] && verbose_flag="true"
+
+    sshexpr_verbose "$_s" "$_f" "$_c"
+
+    [ -n "$compare_string" ] && _buf="compare[$compare_string]" || _buf="command"
+    sshexpr_syslog_write "[$this_name] >> success[$_s], failure[$_f] >> $_buf >> $_hosts \$ $_ocmd"
+    return $RET_VAL
+}
+
+sshexpr_tcp_port_scan() {
+    local _s= _f= _c= _oport= _port= _host= _hosts= _verbose_flag=
+    local _args=("${!1}")
+    local _c=${#_args[@]}
+
+    [ "$_c" -lt "2" ] && exit 1
+    _c=$((_c - 1))
+    _port=${_args[$_c]}
+    _oport=$_port
+    _port=$(sshexpr_escape_ssh_cmd "$_port")
+
+    for ((i=0; i < $_c; i++))
+    do 
+        if [ -n "$_hosts" ]; then
+            _hosts="$_hosts ${_args[$i]}"
+        else
+            _hosts="${_args[$i]}"
+        fi
+    done
+    _c=0 _s=0 _f=0
+    sshexpr_alert "$_hosts" "$_cmd"
+    for _host in $(sshexpr_get_hosts $_hosts)
+    do
+        if [ "$quiet_flag" != "true" ]; then
+            sshexpr_echo "$comment_string $_host:$_oport/tcp" $comment_color
+        fi
+
+        __sshexpr_tcp_port_scan $_host $_port
+        RET_VAL=$?
+
+        if [ "$RET_VAL" == "0" ]; then
+            sshexpr_echo " [open]\n" "red"
+            ((_s++))
+        else
+            sshexpr_echo " [closed]\n" "black"
+            ((_f++))
+        fi
+        ((_c++))
+    done
+
+    return $RET_VAL
+}
+
+sshexpr_process_control_comment() {
+    local _left=$1
+    local _right=$2
+    local _option=$3
+    if [ "$_option" != "quiet" ]; then
+        sshexpr_echo "$comment_string $_left" "$comment_color"
+        sshexpr_echo " \$ $_right" "red" escape_true;echo
+    fi
+}
+
+sshexpr_process_control() {
+    local _args=("${!1}")
+    local _c=${#_args[@]}
+    local _left=${_args[0]}
+    local _right=${_args[1]}
+    local _option=
+
+    [[ "$_left" =~ : ]] && _option=${_left#*:}
+
+    case "$_left" in
+        !echo|!echo:*)
+            [ -n "$_option" ] && sshexpr_echo "$_right" "$_option" || echo -en "$_right"
+            ;;
+        !exec|!exec:*)
+            sshexpr_process_control_comment "$_left" "$_right" "$_option"
+            __sshexpr_function_maps "$_right"
+            ;;
+        !next|!next:*)
+            sshexpr_process_control_comment "$_left" "$_right" "$_option"
+            __sshexpr_function_maps "$_right" || sshexpr_error "stop [$?] \$ $_right"
+            ;;
+
+        !tran|!tran:*)
+            local _right_args=($_right)
+            sshexpr_process_control_comment "$_left" "$_right" "$_option"
+            _args=(${_args[@]:1})
+            sshexpr_transfer_file _args[@]
+            ;;
+        *)
+            sshexpr_transfer_command _args[@]
+            ;;
+    esac
+
+    RET_VAL=$?
+    return $RET_VAL
+}
+
+sshexpr_process_loading() {
+    local _cfg= _args=
+    local _spec_file_path=
+
+    __sshexpr_exist_file "$spec_file_path" && _spec_file_path=$spec_file_path
+    __sshexpr_exist_file "${files_path_spec}/${spec_file_path}" && : ${_spec_file_path:="${files_path_spec}/${spec_file_path}"}
+
+    __sshexpr_exist_file "$_spec_file_path" || sshexpr_error "Spec[${_spec_file_path:-$spec_file_path}] does not exist!"
+    
+    sshexpr_syslog_write "[$this_name] >> process_spec_loading >> $_spec_file_path"
+
+    _c=0
+    for _cfg in $(__sshexpr_load_config ${_spec_file_path} "double_quote_true|ini_true")
+    do 
+        _left=${_cfg%%=*}
+        _right=${_cfg#*=}
+        _right=${_right//\[\[:space:\]\]/ }
+        local _args=("$_left" "$_right")
+        sshexpr_process_control _args[@]
+        ((_c++))
+    done
+
+    RET_VAL=$?
+    return $RET_VAL
+}
+
+sshexpr_usage() {
+    echo "Usage: $this_name [-bdhlnqvxz] [-g group_path] [-p spec_path] [-e exec_path]"
+    echo "                    [-t tunnel_command ] [-o tunnel_command_options]"
+    echo "                    [-f config_file] [-s spec_file] [-c compare_string]"
+    echo "                    [-r [[user@]host:]file ... [[user@]host:]file]"
+    echo "                    [-r [[user@]group:]file ... [[user@]group:]file]"
+    echo "                    [user@]group [user@]host [command]"
+    echo 
+    echo "Options:"
+    echo "         -b turn off request's output"
+    echo "         -d perform a trial run"
+    echo "         -h help"
+    echo "         -l show server list"
+    echo "         -n turn off color"
+    echo "         -q turn off comment's output"
+    echo "         -v verbose mode"
+    echo "         -x set environment variable \"SSHPASS\""
+    echo "         -z used for scanning"
+    echo "         -r file transfer mode"
+    echo
+    echo "Examples:"
+    echo "         $this_name host[1-2] \"command\""
+    echo "         $this_name host1 host2 \"command\""
+    echo "         $this_name host1,host2 \"command\""
+    echo "         $this_name group \"command\""
+    echo "         $this_name group1 group2 \"command\""
+    echo "         $this_name group1,group2 \"command\""
+    echo "         $this_name groups:all \"command\""
+    echo "         $this_name -z host 80"
+    echo "         $this_name -c \"string\" group1 \"command\""
+    echo "         $this_name -l"
+    echo "         $this_name -l groups:all"
+    echo "         $this_name -l group1 group2"
+    echo "         $this_name -r file host:/path/"
+    echo "         $this_name -r file host[1-5]:/path/to/"
+    echo "         $this_name -r host:/path/to/file ."
+    echo "         $this_name -r host[1-5]:/path/to/file ."
+    echo "         $this_name -r file group:/path/to/"
+    echo "         $this_name -r group:/path/to/file ."
+    echo "         $this_name -s /path/to/works.ini"
+    exit 2
+}
+
+sshexpr_getopts() {
+    local _args=("${!1}")
+    set -- "${_args[@]}"
+    [ -z "$1" ] && fp=sshexpr_usage
+    while getopts "bdhlnqrvxzg:p:e:t:o:f:s:c:" Option
+    do
+        case $Option in
+            b)
+                background_flag=true
+                ;;
+            d)
+                trial_flag=true
+                ;;
+            h)
+                fp=sshexpr_usage
+                ;;
+            l)
+                fp=sshexpr_get_list
+                ;;
+            n)
+                ansi_flag=false
+                ;;
+            q)
+                quiet_flag=true
+                ;;
+            r)
+                tranfer_flag=true
+                ;;
+            v)
+                verbose_flag=true
+                ;;
+            x)
+                sshpass_env_flag=true
+                ;;
+            z)
+                scan_flag=true
+                ;;
+            g)
+                _files_path_group=$OPTARG
+                ;;
+            p)
+                _files_path_spec=$OPTARG
+                ;;
+            e)
+                _files_path_exec=$OPTARG
+                ;;
+            t)
+                _tunnel_command=$OPTARG
+                ;;
+            o)
+                _tunnel_command_options=$OPTARG
+                ;;
+            f)
+                G_CFG_PATH=$OPTARG
+                ;;
+            s)
+                sshexpr_set_env
+                fp=sshexpr_process_loading
+                spec_file_path=$OPTARG
+                ;;
+            c)
+                compare_string=$OPTARG
+                ;;
+
+            *)
+                fp=sshexpr_usage
+                ;;
+        esac
+    done
+
+    shift $(($OPTIND - 1))
+    if [ -z "$fp" ]; then
+        [ "$#" -lt "2" ] && sshexpr_usage
+        sshexpr_set_env
+        if [ "$scan_flag" == "true" ]; then
+            fp="sshexpr_tcp_port_scan"
+        elif [ "$tranfer_flag" == "true" ]; then
+            fp="sshexpr_transfer_file"
+        else
+            fp="sshexpr_transfer_command"
+        fi
+    fi
+
+    rest_args=("$@")
+    [ -n "$fp" ] && fp="$fp rest_args[@]"
+}
+
+sshexpr_init() {
+    # set common functions filename
+    functions_file=functions
+
+    # set common functions directory location
+    functions_path=@bash_lib_path@
+
+    # load functions
+    if [ -f "$functions_path/$functions_file" ]; then
+        . $functions_path/$functions_file
+    elif [ -f "$functions_file" ]; then
+        . ./$functions_file
+    else
+        echo "error: $functions_file not found!"
+        exit 1
+    fi
+
+    # load functions
+    #[ -f "$functions_path" ] && . $functions_path || exit 1
+
+    # get config
+    tunnel_command=$(_sshexpr_get_config "tunnel_command")
+    tunnel_command_options=$(_sshexpr_get_config "tunnel_command_options")
+    transfer_command=$(_sshexpr_get_config "transfer_command")
+    transfer_command_options=$(_sshexpr_get_config "transfer_command_options")
+    files_path_group=$(_sshexpr_get_config "files_path_group")
+    files_path_spec=$(_sshexpr_get_config "files_path_spec")
+    files_path_exec=$(_sshexpr_get_config "files_path_exec")
+    alias_groups_all=$(_sshexpr_get_config "alias_groups_all")
+    comment_string=$(_sshexpr_get_config "comment_string")
+    comment_color=$(_sshexpr_get_config "comment_color")
+    
+    alert_regex_group=$(_sshexpr_get_config "alert_regex_group")
+    alert_regex_command=$(_sshexpr_get_config "alert_regex_command")
+    alert_string=$(_sshexpr_get_config "alert_string")
+    alert_color=$(_sshexpr_get_config "alert_color")
+
+    syslog_write=$(_sshexpr_get_config "syslog_write")
+    syslog_facility=$(_sshexpr_get_config "syslog_facility")
+    syslog_level=$(_sshexpr_get_config "syslog_level")
+
+    # replace variables to string(\$tunnel_command...)
+    transfer_command=$(__sshexpr_function_maps "echo -en $transfer_command")
+    transfer_command_options=$(__sshexpr_function_maps "echo -en $transfer_command_options")
+
+    if [ "$sshpass_env_flag" == "true" ]; then
+        local _sshpass_command=
+        __sshexpr_exist_command sshpass && _sshpass_command="sshpass -e $tunnel_command" || _sshpass_command=$tunnel_command
+        ! [[ "$tunnel_command" =~ sshpass ]] && tunnel_command="$_sshpass_command"
+    fi
+
+    # priority
+    tunnel_command=${_tunnel_command:-$tunnel_command}
+    tunnel_command_options=${_tunnel_command_options:-$tunnel_command_options}
+    transfer_command=${_tunnel_command:-$transfer_command}
+    transfer_command_options=${_tunnel_command_options:-$transfer_command_options}
+    files_path_group=${_files_path_group:-$files_path_group}
+    files_path_spec=${_files_path_spec:-$files_path_spec}
+    files_path_exec=${_files_path_exec:-$files_path_exec}
+
+    : ${tunnel_command:=ssh}
+    : ${tunnel_command_option:-}
+    : ${transfer_command:=scp}
+    : ${transfer_command_option:-}
+    : ${comment_string:=>>>}
+    : ${comment_color:=green}
+    : ${alert_regex_group:=.*}
+    : ${alert_regex_command:=.*}
+    : ${alert_string:=Are you sure you want to continue running(yes/no)? }
+    : ${alert_color:=red}
+    : ${syslog_write:-false}
+    : ${syslog_facility:=daemon}
+    : ${syslog_level:=warn}
+    : ${alias_groups_all:=groups:all}
+
+    # set up a default search path.
+    PATH="$PATH:$files_path_exec"
+    export PATH
+
+    # get groups
+    sshexpr_get_groups
+}
+
+main() {
+    local _args=("${!1}")
+    local _c=${#_args[@]}
+
+    sshexpr_getopts _args[@]
+    sshexpr_init
+
+    __sshexpr_function_maps "$fp"
+}
+
+_args=("$@")
+main _args[@]
+
+# :let b:is_bash=1 | set filetype=sh
+# vi:set ft=sh ts=4 sw=4 et fdm=marker:
